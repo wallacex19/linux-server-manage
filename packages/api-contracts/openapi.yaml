@@ -1,0 +1,569 @@
+openapi: 3.0.3
+info:
+  title: Linux Server Manager (LSM) API Contracts
+  description: |
+    Contratos oficiais de API REST para o ecossistema Linux Server Manager.
+    Autenticação no host via PAM, sessões com cookies seguros e controle de acesso estrito no nível do usuário Linux.
+  version: 1.0.0
+paths:
+  /api/v1/health:
+    get:
+      summary: Health check do Control Plane
+      description: Retorna a integridade operacional do backend e conectividade com SQLite.
+      responses:
+        '200':
+          description: Backend saudável
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Serviço indisponível
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /api/v1/version:
+    get:
+      summary: Versão do serviço
+      description: Retorna a versão da API central.
+      responses:
+        '200':
+          description: Informação de versão
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  version:
+                    type: string
+
+  /api/v1/auth/login:
+    post:
+      summary: Autenticação com credenciais do Linux (PAM)
+      description: Valida usuário e senha diretamente no sistema operacional e estabelece sessão segura.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Autenticado com sucesso
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: "lsm_session=...; HttpOnly; SameSite=Lax; Path=/"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          description: Credenciais Linux inválidas
+        '429':
+          description: Bloqueado temporariamente por excesso de tentativas falhas (Rate Limit)
+
+  /api/v1/auth/logout:
+    post:
+      summary: Encerramento de sessão
+      description: Revoga o token de sessão ativo e limpa os cookies.
+      responses:
+        '200':
+          description: Sessão encerrada
+
+  /api/v1/auth/me:
+    get:
+      summary: Obter identidade do usuário autenticado
+      description: Retorna UID, GID, grupos Linux e se o usuário possui privilégios de administrador.
+      responses:
+        '200':
+          description: Perfil do usuário
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LinuxUserIdentity'
+        '401':
+          description: Sessão não autenticada ou expirada
+
+  /api/v1/system/info:
+    get:
+      summary: Obter informações do host Linux
+      description: Retorna hostname, sistema operacional, arquitetura, contagem de CPUs e uptime.
+      responses:
+        '200':
+          description: Dados do sistema
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemInfo'
+        '401':
+          description: Não autorizado
+
+  /api/v1/metrics/current:
+    get:
+      summary: Obter snapshot atual de métricas do sistema
+      description: Retorna uso de CPU, núcleos, memória RAM/swap, I/O de disco, rede e sistema.
+      responses:
+        '200':
+          description: Snapshot atual de métricas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerMetricsSnapshot'
+        '401':
+          description: Não autenticado
+
+  /api/v1/metrics/history:
+    get:
+      summary: Obter histórico de métricas em anel (últimas amostras)
+      description: Retorna array de snapshots cronológicos para plotagem de gráficos na UI.
+      responses:
+        '200':
+          description: Histórico de métricas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ServerMetricsSnapshot'
+        '401':
+          description: Não autenticado
+
+  /api/v1/files/list:
+    get:
+      summary: Listar conteúdo de diretório
+      parameters:
+        - name: path
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Lista de arquivos e diretórios
+        '403':
+          description: Acesso proibido fora do escopo ou caminho protegido
+
+  /api/v1/files/read:
+    get:
+      summary: Ler conteúdo de arquivo de texto
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Conteúdo UTF-8 do arquivo
+
+  /api/v1/files/save:
+    post:
+      summary: Salvar conteúdo em arquivo de texto
+      responses:
+        '200':
+          description: Arquivo salvo com sucesso
+
+  /api/v1/terminal/sessions:
+    get:
+      summary: Listar sessões tmux do usuário Linux
+      responses:
+        '200':
+          description: Lista de sessões persistentes
+    post:
+      summary: Criar nova sessão tmux
+      responses:
+        '201':
+          description: Sessão criada
+
+  /api/v1/terminal/ws:
+    get:
+      summary: Conexão interativa WebSocket com PTY/tmux
+      description: Estabelece streaming bidirecional com emulação xterm.
+
+  /api/v1/system/processes:
+    get:
+      summary: Listar processos do sistema operacional
+      responses:
+        '200':
+          description: Lista de processos com CPU, memória e usuário
+
+  /api/v1/system/processes/kill:
+    post:
+      summary: Finalizar processo
+      description: Permite ao usuário finalizar processos próprios (ou qualquer um se for administrador).
+      responses:
+        '200':
+          description: Processo finalizado
+        '403':
+          description: Tentativa não autorizada de encerrar processo de outro usuário
+
+  /api/v1/system/services:
+    get:
+      summary: Listar serviços systemd do host Linux
+      responses:
+        '200':
+          description: Lista de serviços com active/sub states
+
+  /api/v1/system/services/action:
+    post:
+      summary: Controlar serviço systemd (start, stop, restart)
+      responses:
+        '200':
+          description: Ação executada com sucesso
+        '403':
+          description: Usuário não possui privilégios de superusuário
+
+  /api/v1/system/services/logs:
+    get:
+      summary: Obter logs recentes do serviço via journalctl
+      parameters:
+        - name: name
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Linhas de logs do journald
+
+  /api/v1/steamcmd/status:
+    get:
+      summary: Verificar status de instalação do SteamCMD e suporte a 32-bit
+      responses:
+        '200':
+          description: Diagnóstico de compatibilidade Valve
+
+  /api/v1/steamcmd/presets:
+    get:
+      summary: Obter catálogo de presets de servidores populares (CS2, Valheim, etc.)
+      responses:
+        '200':
+          description: Lista de presets
+
+  /api/v1/games/servers:
+    get:
+      summary: Listar instâncias de servidores de jogos gerenciados
+      responses:
+        '200':
+          description: Lista de servidores pertencentes ao usuário (ou todos se admin)
+    post:
+      summary: Cadastrar nova instância de servidor de jogo
+      responses:
+        '201':
+          description: Servidor cadastrado
+
+  /api/v1/games/servers/{id}:
+    delete:
+      summary: Remover instância de servidor de jogo do painel
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Servidor removido
+
+  /api/v1/games/servers/{id}/start:
+    post:
+      summary: Iniciar servidor de jogo em sessão tmux persistente
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Servidor iniciado
+
+  /api/v1/games/servers/{id}/stop:
+    post:
+      summary: Parar sessão do servidor de jogo
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Servidor parado
+
+  /api/v1/games/servers/{id}/update:
+    post:
+      summary: Executar instalação ou atualização via SteamCMD
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Atualização iniciada em segundo plano
+
+  /api/v1/agent/pair:
+    post:
+      summary: Pareamento inicial seguro do agente Linux
+      description: Vincula a chave pública Ed25519 do nó utilizando o pairing token temporário emitido pelo Control Plane.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pairing_token, public_key, hostname]
+              properties:
+                pairing_token:
+                  type: string
+                public_key:
+                  type: string
+                hostname:
+                  type: string
+                ip_address:
+                  type: string
+                os_info:
+                  type: string
+                agent_version:
+                  type: string
+      responses:
+        '200':
+          description: Agente pareado com sucesso e credenciais permanentes emitidas
+        '401':
+          description: Token de pareamento expirado ou inválido
+        '403':
+          description: Acesso do nó revogado pelo administrador
+
+  /api/v1/agent/connect:
+    get:
+      summary: Conexão persistente reversa do Server Agent (WebSocket)
+      description: Túnel bidirecional seguro iniciado pelo agente para streaming de métricas, PTY e execução de operações autorizadas.
+
+  /api/v1/nodes:
+    get:
+      summary: Listar servidores Linux gerenciados com métricas e status em tempo real
+      parameters:
+        - name: group
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Lista de servidores cadastrados com telemetria
+    post:
+      summary: Cadastrar novo servidor Linux e emitir token de pareamento com TTL de 15 minutos
+      responses:
+        '201':
+          description: Servidor cadastrado com comando de instalação gerado
+
+  /api/v1/nodes/{id}:
+    get:
+      summary: Obter detalhes do servidor Linux
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Detalhes do servidor
+    put:
+      summary: Atualizar nome amigável, grupo ou tags do servidor
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Servidor atualizado
+    delete:
+      summary: Remover servidor do catálogo do painel sem apagar dados locais remotos
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Servidor removido
+
+  /api/v1/nodes/{id}/revoke:
+    post:
+      summary: Revogar imediatamente credenciais e desconectar o agente
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Acesso do agente revogado
+
+components:
+  schemas:
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          example: "admin"
+        password:
+          type: string
+          format: password
+          example: "••••••••"
+
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          example: "8f7e2a..."
+        user:
+          $ref: '#/components/schemas/LinuxUserIdentity'
+
+    LinuxUserIdentity:
+      type: object
+      properties:
+        username:
+          type: string
+          example: "admin"
+        uid:
+          type: integer
+          example: 1000
+        gid:
+          type: integer
+          example: 1000
+        groups:
+          type: array
+          items:
+            type: string
+          example: ["admin", "sudo", "docker"]
+        home_dir:
+          type: string
+          example: "/home/admin"
+        shell:
+          type: string
+          example: "/bin/bash"
+        is_admin:
+          type: boolean
+          example: true
+
+    SystemInfo:
+      type: object
+      properties:
+        hostname:
+          type: string
+          example: "ubuntu-server-01"
+        os:
+          type: string
+          example: "linux"
+        architecture:
+          type: string
+          example: "amd64"
+        cpu_cores:
+          type: integer
+          example: 4
+        go_version:
+          type: string
+          example: "go1.23.0"
+        uptime_seconds:
+          type: integer
+          example: 86400
+
+    ServerMetricsSnapshot:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        cpu:
+          type: object
+          properties:
+            total_percent:
+              type: number
+            cores:
+              type: integer
+        memory:
+          type: object
+          properties:
+            total_bytes:
+              type: integer
+            used_bytes:
+              type: integer
+            used_percent:
+              type: number
+            swap_total_bytes:
+              type: integer
+            swap_used_percent:
+              type: number
+        disk:
+          type: object
+          properties:
+            read_bytes_per_sec:
+              type: integer
+            write_bytes_per_sec:
+              type: integer
+        network:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              rx_bytes_per_sec:
+                type: integer
+              tx_bytes_per_sec:
+                type: integer
+        system:
+          type: object
+          properties:
+            hostname:
+              type: string
+            uptime_seconds:
+              type: integer
+            load_1:
+              type: number
+            process_count:
+              type: integer
+            hardware_temperature_celsius:
+              type: number
+              nullable: true
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: healthy
+        timestamp:
+          type: string
+          format: date-time
+        environment:
+          type: string
+          example: development
+        database:
+          type: string
+          example: connected
+        version:
+          type: string
+          example: 1.0.0

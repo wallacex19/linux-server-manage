@@ -1,0 +1,11 @@
+# Linux Server Manager - Chaves Públicas GPG de Mantenedores Autorizados
+#
+# Para habilitar a validação de assinatura criptográfica de tags no pipeline de release,
+# adicione os blocos de chaves públicas GPG dos mantenedores autorizados neste arquivo
+# (renomeando para maintainers.pub) ou cadastre o bloco ASCII-armor no segredo
+# do repositório 'LSM_MAINTAINER_GPG_PUB'.
+#
+# Formato esperado:
+# -----BEGIN PGP PUBLIC KEY BLOCK-----
+# ...
+# -----END PGP PUBLIC KEY BLOCK-----

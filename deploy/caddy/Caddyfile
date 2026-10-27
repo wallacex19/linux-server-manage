@@ -1,0 +1,38 @@
+# Configuração de referência do Caddy para o Linux Server Manager
+# Ubuntu Server 24.04 LTS
+
+{
+    email admin@example.com
+}
+
+lsm.example.com {
+    # Compressão automática
+    encode zstd gzip
+
+    # Frontend estático compilado (SPA)
+    root * /var/www/lsm-web/dist
+    file_server
+
+    # Reverse proxy para a API REST e WebSockets do Control Plane
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    # Reverse proxy para WebSockets do Hub de Agentes e Terminais xterm
+    handle /ws/* {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    # Roteamento SPA: qualquer rota não encontrada vai para o index.html
+    handle {
+        try_files {path} /index.html
+    }
+
+    # Cabeçalhos recomendados de segurança
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    }
+}

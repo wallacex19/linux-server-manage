@@ -1,0 +1,398 @@
+name: Release Pipeline
+
+# Este workflow privilegiado executa EXCLUSIVAMENTE a partir da branch padrão protegida (main/master).
+# Ele NUNCA executa a partir de tags ou branches não confiáveis, garantindo que
+# o código do workflow e a lógica de assinatura sejam controlados pela linhagem oficial.
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag Git oficial e anotada a ser validada, assinada e publicada (ex: v1.2.2)'
+        required: true
+        type: string
+
+# Permissões mínimas no nível do workflow: nenhuma permissão por padrão
+permissions: {}
+
+jobs:
+  verify-tag-and-commit:
+    name: Verify Release Tag, Commit Lineage & CI Evidence
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      checks: read
+    outputs:
+      target_sha: ${{ steps.validate.outputs.target_sha }}
+      release_tag: ${{ steps.validate.outputs.release_tag }}
+      default_branch: ${{ steps.validate.outputs.default_branch }}
+    steps:
+      - name: Verify Workflow Origin Branch & Determine Default Branch
+        id: check-branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 1. Determina a branch padrão autorizada do repositório
+          DETECTED_DEFAULT=""
+          if command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN}" ]; then
+            DETECTED_DEFAULT=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch' 2>/dev/null || true)
+          fi
+          if [ -z "${DETECTED_DEFAULT}" ]; then
+            DETECTED_DEFAULT=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || true)
+          fi
+          if [ -z "${DETECTED_DEFAULT}" ]; then
+            if git rev-parse --verify origin/main >/dev/null 2>&1; then
+              DETECTED_DEFAULT="main"
+            elif git rev-parse --verify origin/master >/dev/null 2>&1; then
+              DETECTED_DEFAULT="master"
+            fi
+          fi
+
+          if [ -z "${DETECTED_DEFAULT}" ]; then
+            echo "::error::FALHA CRÍTICA DE SEGURANÇA: Não foi possível determinar ou buscar a branch padrão do repositório."
+            exit 1
+          fi
+
+          if [ "${DETECTED_DEFAULT}" != "main" ] && [ "${DETECTED_DEFAULT}" != "master" ]; then
+            echo "::error::FALHA DE POLÍTICA: A branch padrão '${DETECTED_DEFAULT}' não é autorizada para releases oficiais (apenas 'main' ou 'master')."
+            exit 1
+          fi
+
+          if [ "${GITHUB_REF_NAME}" != "${DETECTED_DEFAULT}" ]; then
+            echo "::error::SEGURANÇA: Este workflow privilegiado de release deve ser executado exclusivamente a partir da branch padrão protegida '${DETECTED_DEFAULT}'. Referência atual: '${GITHUB_REF_NAME}'"
+            exit 1
+          fi
+
+          echo "Workflow executando a partir da branch padrão protegida autorizada: ${DETECTED_DEFAULT}"
+          echo "default_branch=${DETECTED_DEFAULT}" >> "${GITHUB_ENV}"
+
+      - name: Checkout Trusted Repository History
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Validate Release Tag Structure & Cryptographic Signature Against Independent Trust Root
+        id: validate
+        env:
+          MAINTAINER_GPG_PUB_SECRET: ${{ secrets.LSM_MAINTAINER_GPG_PUB }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ env.default_branch }}
+        run: |
+          TAG_NAME="${{ inputs.release_tag }}"
+          if [ -z "${TAG_NAME}" ]; then
+            echo "::error::Parâmetro release_tag é obrigatório."
+            exit 1
+          fi
+
+          echo "Iniciando auditoria de segurança da tag pretendida: ${TAG_NAME}"
+          echo "Branch padrão protegida identificada: ${DEFAULT_BRANCH}"
+
+          # 1. Garante que a branch padrão remota e todas as tags estão atualizadas no workspace
+          git fetch origin "${DEFAULT_BRANCH}" --tags
+
+          if ! git rev-parse --verify "origin/${DEFAULT_BRANCH}" >/dev/null 2>&1; then
+            echo "::error::FALHA DE INTEGRIDADE: A referência remota 'origin/${DEFAULT_BRANCH}' não foi encontrada ou não pôde ser verificada."
+            exit 1
+          fi
+
+          if ! git rev-parse --verify "refs/tags/${TAG_NAME}" >/dev/null 2>&1; then
+            echo "::error::A tag '${TAG_NAME}' não foi encontrada no repositório remoto."
+            exit 1
+          fi
+
+          # 2. Verifica se a tag é anotada (rejeita tags leves não anotadas e não assinadas)
+          TAG_TYPE=$(git cat-file -t "${TAG_NAME}" 2>/dev/null || true)
+          if [ "${TAG_TYPE}" != "tag" ]; then
+            echo "::error::A tag '${TAG_NAME}' é uma tag leve (lightweight tag) não anotada e não assinada."
+            echo "::error::Releases oficiais exigem obrigatoriamente tags anotadas e assinadas criptograficamente com GPG."
+            exit 1
+          fi
+
+          # 3. Obtenção da raiz de confiança INDEPENDENTE da tag
+          # A chave pública confiável NUNCA é lida da árvore da tag sendo lançada.
+          MAINTAINER_KEY=""
+          if [ -n "${MAINTAINER_GPG_PUB_SECRET}" ]; then
+            echo "Carregando chave pública de mantenedor a partir do segredo independente LSM_MAINTAINER_GPG_PUB..."
+            MAINTAINER_KEY="${MAINTAINER_GPG_PUB_SECRET}"
+          else
+            # Extrai exclusivamente da branch padrão protegida
+            if git rev-parse --verify "origin/${DEFAULT_BRANCH}" >/dev/null 2>&1; then
+              echo "Extraindo deploy/scripts/certs/maintainers.pub estritamente da branch protegida origin/${DEFAULT_BRANCH}..."
+              MAINTAINER_KEY=$(git show "origin/${DEFAULT_BRANCH}:deploy/scripts/certs/maintainers.pub" 2>/dev/null || true)
+            fi
+          fi
+
+          if [ -z "${MAINTAINER_KEY}" ] || ! echo "${MAINTAINER_KEY}" | grep -q -- "-----BEGIN PGP PUBLIC KEY BLOCK-----"; then
+            echo "::error::PRÉ-REQUISITO ADMINISTRATIVO BLOQUEANTE: Nenhuma chave pública de mantenedor confiável encontrada em LSM_MAINTAINER_GPG_PUB ou na branch protegida origin/${DEFAULT_BRANCH}:deploy/scripts/certs/maintainers.pub."
+            echo "::error::A raiz de confiança para assinatura de tags deve ser previamente cadastrada no repositório por administradores."
+            exit 1
+          fi
+
+          # Importa a chave confiável no keyring GPG
+          printf '%s\n' "${MAINTAINER_KEY}" | gpg --batch --import || {
+            echo "::error::Falha ao importar chave pública de mantenedor da raiz de confiança independente."
+            exit 1
+          }
+
+          # 4. Validação criptográfica estrita da assinatura da tag
+          echo "Verificando assinatura criptográfica da tag ${TAG_NAME} contra a raiz de confiança..."
+          if ! git tag -v "${TAG_NAME}" 2>&1; then
+            echo "::error::FALHA CRÍTICA DE AUTORIZAÇÃO: A tag '${TAG_NAME}' não possui assinatura criptográfica válida emitida por mantenedor confiável cadastrado na raiz de confiança."
+            exit 1
+          fi
+          echo "Assinatura criptográfica da tag ${TAG_NAME} verificada com sucesso!"
+
+          # 5. Obtém o commit SHA exato referenciado pela tag
+          TARGET_SHA=$(git rev-list -n 1 "${TAG_NAME}")
+          echo "Commit referenciado pela tag: ${TARGET_SHA}"
+
+          # 6. Valida linhagem do commit EXCLUSIVAMENTE na branch padrão protegida autorizada
+          # Nenhuma branch alternativa ou de versão é aceita para substituir a branch padrão
+          echo "Validando se o commit ${TARGET_SHA} pertence ao histórico da branch padrão protegida 'origin/${DEFAULT_BRANCH}'..."
+          if ! git merge-base --is-ancestor "${TARGET_SHA}" "origin/${DEFAULT_BRANCH}"; then
+            echo "::error::FALHA CRÍTICA DE CONFORMIDADE: O commit ${TARGET_SHA} apontado pela tag '${TAG_NAME}' NÃO pertence à linhagem da branch padrão protegida 'origin/${DEFAULT_BRANCH}'."
+            echo "::error::Commits existentes apenas em branches de release, tags ou branches secundárias não são autorizados para publicação."
+            exit 1
+          fi
+          echo "Commit ${TARGET_SHA} verificado com sucesso na linhagem da branch padrão protegida 'origin/${DEFAULT_BRANCH}'."
+
+          # 7. Validação mandatória de evidência de CI aprovado para o commit exato TARGET_SHA
+          echo "Consultando todas as páginas de check-runs de CI para o commit ${TARGET_SHA} via GitHub API..."
+
+          PAGINATED_RUNS=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/commits/${TARGET_SHA}/check-runs" \
+            --jq '.check_runs[] | [.name, .head_sha, .status, (.conclusion // "none"), (.app.slug // "none")] | @tsv' 2>/dev/null) || {
+            echo "::error::FALHA CRÍTICA DE API: Não foi possível obter check-runs via GitHub API para o commit ${TARGET_SHA}."
+            exit 1
+          }
+
+          if [ -z "${PAGINATED_RUNS}" ]; then
+            echo "::error::PRÉ-REQUISITO BLOQUEANTE: Nenhuma check-run foi retornada pela API para o commit ${TARGET_SHA}."
+            exit 1
+          fi
+
+          REQUIRED_CHECKS=(
+            "Control Plane (Go 1.26.10)"
+            "Control Plane (Go 1.27.3)"
+            "Server Agent (Go 1.26.10)"
+            "Server Agent (Go 1.27.3)"
+            "Frontend Web (Node.js 20)"
+            "Shell Scripts Lint & Validation"
+          )
+
+          declare -A CHECK_SUCCESS_COUNT=()
+          for req in "${REQUIRED_CHECKS[@]}"; do
+            CHECK_SUCCESS_COUNT["${req}"]=0
+          done
+
+          TOTAL_PROCESSED=0
+          ANY_FAILURE=false
+
+          while IFS=$'\t' read -r check_name check_sha check_status check_conclusion check_app || [ -n "${check_name}" ]; do
+            [ -z "${check_name}" ] && continue
+
+            # Ignora a própria execução do workflow de release
+            if [ "${check_name}" = "Release Pipeline" ] || [ "${check_name}" = "Verify Release Tag, Commit Lineage & CI Evidence" ]; then
+              continue
+            fi
+
+            TOTAL_PROCESSED=$((TOTAL_PROCESSED + 1))
+            echo "Avaliando check: '${check_name}' | SHA: ${check_sha} | App: ${check_app} | Status: ${check_status} | Conclusão: ${check_conclusion}"
+
+            # Valida se o check pertence ao SHA exato do commit-alvo
+            if [ "${check_sha}" != "${TARGET_SHA}" ]; then
+              echo "::error::ANOMALIA DE INTEGRIDADE: Check '${check_name}' reportou head_sha (${check_sha}) divergente do TARGET_SHA (${TARGET_SHA})."
+              exit 1
+            fi
+
+            # Rejeita se qualquer verificação da linhagem falhou, foi cancelada ou deu timeout
+            if [ "${check_conclusion}" = "failure" ] || [ "${check_conclusion}" = "cancelled" ] || [ "${check_conclusion}" = "timed_out" ]; then
+              echo "::error::FALHA CRÍTICA DE POLÍTICA: Verificação '${check_name}' (app: ${check_app}) finalizou com falha (conclusão: ${check_conclusion})."
+              ANY_FAILURE=true
+            fi
+
+            # Rejeita se houver verificações ainda em andamento ou enfileiradas
+            if [ "${check_status}" != "completed" ]; then
+              echo "::error::BLOQUEIO: Verificação '${check_name}' ainda não está concluída (status: ${check_status}). Aguarde a conclusão de todos os testes."
+              exit 1
+            fi
+
+            # Apenas o aplicativo oficial 'github-actions' pode satisfazer os checks do CI oficial
+            if [ "${check_app}" != "github-actions" ]; then
+              echo "::warning::Check '${check_name}' foi publicado por aplicação externa '${check_app}' (não substitui o CI oficial github-actions)."
+              continue
+            fi
+
+            # Valida se é um dos checks obrigatórios
+            for req in "${REQUIRED_CHECKS[@]}"; do
+              if [ "${check_name}" = "${req}" ]; then
+                if [ "${check_status}" = "completed" ] && [ "${check_conclusion}" = "success" ]; then
+                  CHECK_SUCCESS_COUNT["${req}"]=$(( CHECK_SUCCESS_COUNT["${req}"] + 1 ))
+                else
+                  echo "::error::Check obrigatório '${req}' não obteve sucesso (status: ${check_status}, conclusão: ${check_conclusion})."
+                  ANY_FAILURE=true
+                fi
+              fi
+            done
+          done <<< "${PAGINATED_RUNS}"
+
+          if [ "${ANY_FAILURE}" = "true" ]; then
+            echo "::error::FALHA CRÍTICA DE CI: Uma ou mais verificações de CI do commit ${TARGET_SHA} falharam."
+            exit 1
+          fi
+
+          if [ "${TOTAL_PROCESSED}" -eq 0 ]; then
+            echo "::error::FALHA DE POLÍTICA: Nenhum check relevante foi encontrado nas páginas retornadas."
+            exit 1
+          fi
+
+          # Confirma presença de todos os 6 checks obrigatórios
+          MISSING_CHECKS=0
+          for req in "${REQUIRED_CHECKS[@]}"; do
+            count="${CHECK_SUCCESS_COUNT[${req}]}"
+            if [ "${count}" -eq 0 ]; then
+              echo "::error::PRÉ-REQUISITO BLOQUEANTE: Check obrigatório ausente: '${req}'."
+              MISSING_CHECKS=$((MISSING_CHECKS + 1))
+            elif [ "${count}" -gt 1 ]; then
+              echo "::notice::Check obrigatório '${req}' possui ${count} execuções registradas, todas com status 'completed' e 'success'."
+            else
+              echo "Check obrigatório confirmado com sucesso: '${req}'"
+            fi
+          done
+
+          if [ "${MISSING_CHECKS}" -gt 0 ]; then
+            echo "::error::FALHA CRÍTICA DE CONFORMIDADE: ${MISSING_CHECKS} check(s) obrigatório(s) do CI ausente(s) para o commit ${TARGET_SHA}."
+            exit 1
+          fi
+
+          echo "Evidência mandatória de CI confirmada com sucesso (todos os 6 checks obrigatórios aprovados para ${TARGET_SHA})!"
+
+          # Exporta outputs para os próximos jobs
+          echo "target_sha=${TARGET_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "release_tag=${TAG_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "default_branch=${DEFAULT_BRANCH}" >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: Build Linux Binaries (Untrusted Execution Environment)
+    needs: verify-tag-and-commit
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      GOTOOLCHAIN: local
+      GO_VERSION: '1.26.10'
+    steps:
+      - name: Checkout Code at Target Commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify-tag-and-commit.outputs.target_sha }}
+
+      - name: Set up Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Prepare Distribution Directory
+        run: mkdir -p dist
+
+      # Compilação direta via ferramentas padrão Go sem invocar scripts não confiáveis
+      - name: Build Control Plane (linux/amd64 & linux/arm64)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -C services/control-plane -ldflags="-s -w" -o ../../dist/lsm-control-plane-linux-amd64 ./cmd/server
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -C services/control-plane -ldflags="-s -w" -o ../../dist/lsm-control-plane-linux-arm64 ./cmd/server
+
+      - name: Build Server Agent (linux/amd64 & linux/arm64)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -C services/server-agent -ldflags="-s -w" -o ../../dist/lsm-agent-linux-amd64 ./cmd/agent
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -C services/server-agent -ldflags="-s -w" -o ../../dist/lsm-agent-linux-arm64 ./cmd/agent
+
+      - name: Generate Canonical SHA-256 Manifest
+        working-directory: dist
+        run: |
+          # Gera manifesto canônico estrito apenas com os quatro binários oficiais, sem caminhos
+          sha256sum lsm-control-plane-linux-amd64 lsm-control-plane-linux-arm64 lsm-agent-linux-amd64 lsm-agent-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload Build Artifacts for Isolated Signing
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-binaries
+          path: dist/*
+          retention-days: 1
+          if-no-files-found: error
+
+  sign-and-publish:
+    name: Sign Manifest & Publish Release (Protected Environment)
+    needs: [verify-tag-and-commit, build]
+    runs-on: ubuntu-24.04
+    # Requer aprovação explícita e regras de proteção do ambiente GitHub 'release-signing'
+    environment: release-signing
+    permissions:
+      contents: write # Apenas este job tem permissão de criar a release oficial
+    steps:
+      - name: Checkout Code from Trusted Branch (para verificação da chave pública oficial)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify-tag-and-commit.outputs.default_branch }}
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-binaries
+          path: dist
+
+      - name: Verify Artifact Integrity Before Signing (No Binary Execution)
+        working-directory: dist
+        run: |
+          # Confirma que os quatro binários foram recebidos íntegros e batem exatamente com o manifesto
+          # NENHUM binário de build é executado neste ambiente protegido
+          sha256sum -c SHA256SUMS
+
+      - name: Cryptographic Signing with Protected CI Release Key (RSA-2048 with SHA-256)
+        env:
+          RELEASE_KEY: ${{ secrets.LSM_RELEASE_PRIVATE_KEY }}
+        run: |
+          if [ -z "${RELEASE_KEY}" ]; then
+            echo "::error::PRÉ-REQUISITO BLOQUEANTE: Secret LSM_RELEASE_PRIVATE_KEY não configurado ou vazio no ambiente protegido 'release-signing'."
+            echo "::error::Certifique-se de configurar o environment 'release-signing' com o secret 'LSM_RELEASE_PRIVATE_KEY' no GitHub."
+            exit 1
+          fi
+
+          if [ ! -f "deploy/scripts/certs/ci-release.pub" ]; then
+            echo "::error::Chave pública oficial deploy/scripts/certs/ci-release.pub não encontrada no repositório."
+            exit 1
+          fi
+
+          # Processo seguro em subshell: chave privada nunca é persistida em arquivo no disco
+          # Algoritmo Oficial Estrito: RSA com digest SHA-256 via openssl dgst -sha256 -sign
+          printf '%s\n' "${RELEASE_KEY}" | openssl dgst -sha256 -sign /dev/stdin -out dist/SHA256SUMS.sig dist/SHA256SUMS
+
+      - name: Verify Cryptographic Signature Against Root-of-Trust Public Key
+        run: |
+          # 1. Valida fingerprint SHA-256 da chave pública oficial RSA-2048
+          EXPECTED_FINGERPRINT="43ff16c386fdf1982f28c1ba18c68ee529a7d58115b5a8647bf3e40669b8fc40"
+          ACTUAL_FINGERPRINT=$(sha256sum deploy/scripts/certs/ci-release.pub | awk '{print $1}')
+          if [ "${ACTUAL_FINGERPRINT}" != "${EXPECTED_FINGERPRINT}" ]; then
+            echo "::error::Fingerprint da chave pública de release (${ACTUAL_FINGERPRINT}) não coincide com a autoridade oficial (${EXPECTED_FINGERPRINT})."
+            exit 1
+          fi
+
+          # 2. Valida a assinatura digital gerada contra a chave pública oficial (RSA SHA-256)
+          if ! openssl dgst -sha256 -verify deploy/scripts/certs/ci-release.pub -signature dist/SHA256SUMS.sig dist/SHA256SUMS; then
+            echo "::error::FALHA CRÍTICA: A assinatura gerada não confere com a chave pública oficial. Verifique a correspondência do par de chaves."
+            exit 1
+          fi
+          echo "Assinatura digital RSA/SHA-256 dos artefatos de release verificada e autenticada com sucesso!"
+
+      - name: Publish Official GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ needs.verify-tag-and-commit.outputs.release_tag }}
+          files: |
+            dist/lsm-control-plane-linux-amd64
+            dist/lsm-control-plane-linux-arm64
+            dist/lsm-agent-linux-amd64
+            dist/lsm-agent-linux-arm64
+            dist/SHA256SUMS
+            dist/SHA256SUMS.sig
+          draft: false
+          prerelease: false
+          generate_release_notes: true

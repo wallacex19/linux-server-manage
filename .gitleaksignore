@@ -1,0 +1,3 @@
+# Gitleaks ignore list for false positives in unit/acceptance tests
+de67cb8f0f395a21c415bb14ad39fb8f77047a12:services/control-plane/internal/nodes/multiserver_acceptance_test.go:generic-api-key:47
+de67cb8f0f395a21c415bb14ad39fb8f77047a12:services/control-plane/internal/nodes/multiserver_acceptance_test.go:generic-api-key:63
