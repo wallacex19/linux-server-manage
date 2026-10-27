@@ -66,7 +66,7 @@ sign_with_key() {
     local m_path="$2"
     local s_out="$3"
     # No Linux (Ubuntu 24.04 do CI), /dev/stdin é nativo do VFS e permite passagem da chave em memória
-    if cat "${k_path}" | openssl dgst -sha256 -sign /dev/stdin -out "${s_out}" "${m_path}" 2>/dev/null; then
+    if openssl dgst -sha256 -sign /dev/stdin -out "${s_out}" "${m_path}" < "${k_path}" 2>/dev/null; then
         return 0
     else
         # Fallback para ambientes locais Windows onde mingw64 openssl não possui suporte a /dev/stdin

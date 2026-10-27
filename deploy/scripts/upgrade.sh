@@ -37,7 +37,7 @@ if [[ -z "${ROLE}" ]]; then
 fi
 
 log_step "Iniciando atualização idempotente para: ${ROLE}..."
-detect_os_and_arch
+detect_os_and_arch "${DRY_RUN}"
 
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 

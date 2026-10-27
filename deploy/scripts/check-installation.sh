@@ -13,7 +13,7 @@ log_step "=========================================================="
 log_step "   Linux Server Manager - Diagnóstico de Instalação      "
 log_step "=========================================================="
 
-detect_os_and_arch || true
+detect_os_and_arch "false" || true
 
 log_step "1. Status dos Serviços systemd:"
 for svc in "lsm-control-plane.service" "lsm-agent.service" "caddy.service"; do

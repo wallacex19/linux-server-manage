@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -40,7 +41,8 @@ func TestTLS_RejectInvalidOrUntrustedCertificate(t *testing.T) {
 	// Prova especificamente que o erro decorre de validação de certificado (x509),
 	// e NÃO de encerramento prematuro de conexão ou erro genérico de socket.
 	// =========================================================================
-	tlsConn, tlsErr := tls.Dial("tcp", serverAddr, &tls.Config{
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	tlsConn, tlsErr := tls.DialWithDialer(dialer, "tcp", serverAddr, &tls.Config{
 		InsecureSkipVerify: false,
 	})
 	if tlsConn != nil {
@@ -74,7 +76,7 @@ func TestTLS_RejectInvalidOrUntrustedCertificate(t *testing.T) {
 	trustedPool := x509.NewCertPool()
 	trustedPool.AddCert(ts.Certificate())
 
-	validTLSConn, validTLSErr := tls.Dial("tcp", serverAddr, &tls.Config{
+	validTLSConn, validTLSErr := tls.DialWithDialer(dialer, "tcp", serverAddr, &tls.Config{
 		RootCAs:            trustedPool,
 		InsecureSkipVerify: false,
 	})

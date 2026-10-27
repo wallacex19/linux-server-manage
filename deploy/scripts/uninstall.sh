@@ -45,7 +45,7 @@ if [[ -z "${ROLE}" ]]; then
 fi
 
 log_step "Iniciando desinstalação segura do Linux Server Manager (Role: ${ROLE})..."
-detect_os_and_arch
+detect_os_and_arch "${DRY_RUN}"
 
 uninstall_cp() {
     log_info "Parando e desativando serviço lsm-control-plane..."
