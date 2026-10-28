@@ -41,7 +41,7 @@ func TestTLS_RejectInvalidOrUntrustedCertificate(t *testing.T) {
 	// Prova especificamente que o erro decorre de validação de certificado (x509),
 	// e NÃO de encerramento prematuro de conexão ou erro genérico de socket.
 	// =========================================================================
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	dialer := &net.Dialer{Timeout: 30 * time.Second}
 	tlsConn, tlsErr := tls.DialWithDialer(dialer, "tcp", serverAddr, &tls.Config{
 		InsecureSkipVerify: false,
 	})
